@@ -8,7 +8,7 @@ WSL2_TAP_NAME=eth0
 WIN_STORE="/files"
 WIN_PATH="$USERPROFILE/wsl-vpnkit"
 CONF_PATH="$WIN_PATH/wsl-vpnkit.conf"
-GVPROXY_PATH="$WIN_PATH/wsl-gvproxy.exe"
+GVPROXY_PATH="/files/wsl-gvproxy.exe"
 
 echo "starting wsl-vpnkit"
 
