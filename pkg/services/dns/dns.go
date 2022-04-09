@@ -11,11 +11,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type dnsHandler struct {
-	zones []types.Zone
+type resolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+	LookupNS(ctx context.Context, name string) ([]*net.NS, error)
 }
 
-func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg) {
+type dnsHandler struct {
+	zones    []types.Zone
+	resolver resolver
+}
+
+func (h *dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.RecursionAvailable = true
@@ -30,83 +36,102 @@ func (h *dnsHandler) addAnswers(m *dns.Msg) {
 		for _, zone := range h.zones {
 			zoneSuffix := fmt.Sprintf(".%s", zone.Name)
 			if strings.HasSuffix(q.Name, zoneSuffix) {
-				if q.Qtype != dns.TypeA {
-					return
-				}
-				for _, record := range zone.Records {
-					withoutZone := strings.TrimSuffix(q.Name, zoneSuffix)
-					if (record.Name != "" && record.Name == withoutZone) ||
-						(record.Regexp != nil && record.Regexp.MatchString(withoutZone)) {
-						m.Answer = append(m.Answer, &dns.A{
-							Hdr: dns.RR_Header{
-								Name:   q.Name,
-								Rrtype: dns.TypeA,
-								Class:  dns.ClassINET,
-								Ttl:    0,
-							},
-							A: record.IP,
-						})
-						return
-					}
-				}
-				if !zone.DefaultIP.Equal(net.IP("")) {
-					m.Answer = append(m.Answer, &dns.A{
-						Hdr: dns.RR_Header{
-							Name:   q.Name,
-							Rrtype: dns.TypeA,
-							Class:  dns.ClassINET,
-							Ttl:    0,
-						},
-						A: zone.DefaultIP,
-					})
-					return
-				}
-				m.Rcode = dns.RcodeNameError
+				h.handleZone(zone, zoneSuffix, q, m)
 				return
 			}
 		}
 
-		resolver := net.Resolver{
-			PreferGo: false,
-		}
 		switch q.Qtype {
 		case dns.TypeNS:
-			records, err := resolver.LookupNS(context.TODO(), q.Name)
-			if err != nil {
-				m.Rcode = dns.RcodeNameError
-				return
-			}
-			for _, ns := range records {
-				m.Answer = append(m.Answer, &dns.NS{
-					Hdr: dns.RR_Header{
-						Name:   q.Name,
-						Rrtype: dns.TypeNS,
-						Class:  dns.ClassINET,
-						Ttl:    0,
-					},
-					Ns: ns.Host,
-				})
-			}
+			h.handleTypeNS(context.TODO(), q, m)
 		case dns.TypeA:
-			ips, err := resolver.LookupIPAddr(context.TODO(), q.Name)
-			if err != nil {
-				m.Rcode = dns.RcodeNameError
-				return
-			}
-			for _, ip := range ips {
-				if len(ip.IP.To4()) != net.IPv4len {
-					continue
-				}
-				m.Answer = append(m.Answer, &dns.A{
-					Hdr: dns.RR_Header{
-						Name:   q.Name,
-						Rrtype: dns.TypeA,
-						Class:  dns.ClassINET,
-						Ttl:    0,
-					},
-					A: ip.IP.To4(),
-				})
-			}
+			h.handleTypeA(context.TODO(), q, m)
 		}
 	}
+}
+
+func (h *dnsHandler) handleZone(zone types.Zone, zoneSuffix string, q dns.Question, m *dns.Msg) {
+	if q.Qtype != dns.TypeA {
+		return
+	}
+	for _, record := range zone.Records {
+		withoutZone := strings.TrimSuffix(q.Name, zoneSuffix)
+		if (record.Name != "" && record.Name == withoutZone) ||
+			(record.Regexp != nil && record.Regexp.MatchString(withoutZone)) {
+			m.Answer = append(m.Answer, &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   q.Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    0,
+				},
+				A: record.IP,
+			})
+			return
+		}
+	}
+	if !zone.DefaultIP.Equal(net.IP("")) {
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{
+				Name:   q.Name,
+				Rrtype: dns.TypeA,
+				Class:  dns.ClassINET,
+				Ttl:    0,
+			},
+			A: zone.DefaultIP,
+		})
+		return
+	}
+	m.Rcode = dns.RcodeNameError
+}
+
+func (h *dnsHandler) handleTypeNS(ctx context.Context, q dns.Question, m *dns.Msg) {
+	records, err := h.resolver.LookupNS(ctx, q.Name)
+	if err != nil {
+		m.Rcode = dns.RcodeNameError
+		return
+	}
+	for _, ns := range records {
+		m.Answer = append(m.Answer, &dns.NS{
+			Hdr: dns.RR_Header{
+				Name:   q.Name,
+				Rrtype: dns.TypeNS,
+				Class:  dns.ClassINET,
+				Ttl:    0,
+			},
+			Ns: ns.Host,
+		})
+	}
+}
+
+func (h *dnsHandler) handleTypeA(ctx context.Context, q dns.Question, m *dns.Msg) {
+	ips, err := h.resolver.LookupIPAddr(ctx, q.Name)
+	if err != nil {
+		m.Rcode = dns.RcodeNameError
+		return
+	}
+	for _, ip := range ips {
+		if len(ip.IP.To4()) != net.IPv4len {
+			continue
+		}
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{
+				Name:   q.Name,
+				Rrtype: dns.TypeA,
+				Class:  dns.ClassINET,
+				Ttl:    0,
+			},
+			A: ip.IP.To4(),
+		})
+	}
+}
+
+func NewHandler(zones []types.Zone, resolver resolver) dns.Handler {
+	mux := dns.NewServeMux()
+	handler := &dnsHandler{
+		zones:    zones,
+		resolver: resolver,
+	}
+	mux.HandleFunc(".", handler.ServeDNS)
+	return mux
 }

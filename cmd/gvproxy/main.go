@@ -2,16 +2,16 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/containers/gvisor-tap-vsock/pkg/types"
-	"github.com/containers/gvisor-tap-vsock/pkg/virtualnetwork"
+	meikgDNS "github.com/miekg/dns"
 	"github.com/pkg/errors"
 	"github.com/sakai135/wsl-vpnkit/pkg/services/dns"
 	"github.com/sakai135/wsl-vpnkit/pkg/transport"
+	"github.com/sakai135/wsl-vpnkit/pkg/virtualnetwork"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -43,8 +43,29 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
+	vn, err := virtualnetwork.New(config)
+	if err != nil {
+		log.Error(err)
+		exitCode = 1
+		return
+	}
+	dnsServer := dns.NewServer(vn, dns.NewHandler(config.DNS, &net.Resolver{PreferGo: false}), meikgDNS.ActivateAndServe)
+	gatewayIP := net.ParseIP(config.GatewayIP)
 	groupErrs.Go(func() error {
-		return run(ctx, groupErrs, config)
+		go func() {
+			err := dnsServer.StartTCP(gatewayIP, 53)
+			if err != nil {
+				log.Error(err)
+			}
+		}()
+		go func() {
+			err := dnsServer.StartUDP(gatewayIP, 53)
+			if err != nil {
+				log.Error(err)
+			}
+		}()
+		conn := transport.GetStdioConn()
+		return vn.Accept(ctx, conn)
 	})
 
 	// Wait for something to happen
@@ -63,30 +84,4 @@ func main() {
 		log.Error(err)
 		exitCode = 1
 	}
-}
-
-func run(ctx context.Context, g *errgroup.Group, configuration *types.Configuration) error {
-	vn, err := virtualnetwork.New(configuration)
-	if err != nil {
-		return err
-	}
-
-	lnDns, err := vn.Listen("tcp", fmt.Sprintf("%s:53", configuration.GatewayIP))
-	if err != nil {
-		return err
-	}
-	go func() {
-		err := dns.ServeListener(lnDns, configuration.DNS)
-		if err != nil {
-			log.Error(err)
-		}
-	}()
-
-	conn := transport.GetStdioConn()
-	err = vn.AcceptQemu(ctx, conn)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }

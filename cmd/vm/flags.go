@@ -2,12 +2,11 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"net"
 	"os"
 
 	"github.com/pkg/errors"
-	"github.com/vishvananda/netlink"
+	"github.com/sakai135/wsl-vpnkit/pkg/platform/link"
 )
 
 const (
@@ -59,15 +58,8 @@ func parseVMFlags() (*VMFlags, error) {
 	if _, _, err := net.ParseCIDR(f.Subnet); err != nil {
 		return nil, errors.Wrap(err, "invalid subnet")
 	}
-
-	links, err := netlink.LinkList()
-	if err != nil {
-		return nil, err
-	}
-	for _, link := range links {
-		if f.Iface == link.Attrs().Name {
-			return nil, errors.New(fmt.Sprintf("interface %s already exists", link.Attrs().Name))
-		}
+	if err := link.VerifyInterface(f.Iface); err != nil {
+		return nil, errors.Wrap(err, "invalid iface")
 	}
 
 	f.MAC = vmMacAddress
